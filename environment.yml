@@ -5,7 +5,7 @@ channels:
 - conda-forge
 
 dependencies:
-  - python
+  - python=3.5
   - kwant
   - holoviews
   - sympy
