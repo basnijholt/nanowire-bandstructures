@@ -136,19 +136,20 @@ def make_3d_wire(a=10, R=50, L=None, holes=True, verbose=False):
         The finalized (in)finite system.
     """
     k_x, k_y, k_z = discretizer.momentum_operators
+    x, y, z = discretizer.coordinates
     t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols('t B_x B_y B_z mu_B Delta mu alpha g V', real=True)
     k =  sympy.sqrt(k_x**2+k_y**2+k_z**2)
     if holes:
-        hamiltonian = ((t * k**2 - mu - V) * kr(s0, sz) +
+        hamiltonian = ((t * k**2 - mu - V(x, y, z)) * kr(s0, sz) +
                        alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz)) +
                        0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0)) +
                        Delta * kr(s0, sx))
     else:
-        hamiltonian = ((t * k**2 - mu - V) * s0 + alpha * (k_y * sx - k_x * sy) +
+        hamiltonian = ((t * k**2 - mu - V(x, y, z)) * s0 + alpha * (k_y * sx - k_x * sy) +
                        0.5 * g * mu_B * (B_x * sx + B_y * sy + B_z * sz) +
                        Delta * s0)
 
-    tb = discretizer.Discretizer(hamiltonian, space_dependent={'V'}, lattice_constant=a,
+    tb = discretizer.Discretizer(hamiltonian, lattice_constant=a,
                      verbose=verbose)
     syst = kwant.Builder(kwant.TranslationalSymmetry((-a, 0, 0)))
 
@@ -216,11 +217,12 @@ def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=Tr
         The finalized infinite system.
     """
     k_x, k_y, k_z = discretizer.momentum_operators
+    x, y, z = discretizer.coordinates
     t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols('t B_x B_y B_z mu_B Delta mu alpha g V', real=True)
     t_interface = sympy.symbols('t_interface', real=True)
     k =  sympy.sqrt(k_x**2+k_y**2+k_z**2)
 
-    hamiltonian = ((t * k**2 - mu - V) * kr(s0, sz) +
+    hamiltonian = ((t * k**2 - mu - V(x, y, z)) * kr(s0, sz) +
                    alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz)) +
                    0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0)) +
                    Delta * kr(s0, sx))
@@ -238,7 +240,7 @@ def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=Tr
         r_mid = (r1 + r2) / 2
         return sector, (0, r_mid * np.sin(angle), r_mid * np.cos(angle))
 
-    args = dict(space_dependent={'V'}, lattice_constant=a)
+    args = dict(lattice_constant=a)
     tb_normal = discretizer.Discretizer(hamiltonian.subs(Delta, 0), **args)
     tb_sc = discretizer.Discretizer(hamiltonian, **args)
     tb_interface = discretizer.Discretizer(hamiltonian.subs(t, t_interface), **args)
