@@ -120,10 +120,11 @@ def make_wire(
     dim=1,
     left_lead=True,
     right_lead=True,
-    subs_right={},
-    subs_left={},
+    subs_right=None,
+    subs_left=None,
+    subs_mid=None,
 ):
-    """Create a 3D SNS junction wire.
+    """Create a 3D wire with one SC lead.
 
     Parameters
     ----------
@@ -150,28 +151,21 @@ def make_wire(
     >>> syst, hopping = make_3d_wire(**syst_params)
 
     """
+    subs_right = subs_right or {"V": "V_left", "Delta": "0"}
+    subs_left = subs_left or {"V": "V_right"}
+    subs_mid = subs_mid or {}
+
     syst = kwant.Builder()
-    V = (
-        "V(site, mfp, mu, salt, L_NbTiN, "
-        "V_barrier, L_barrier, x_barrier, V_left, V_right)"
-    )
-    subs = {
-        "V": V,
-        "Delta": "Delta(x, L_NbTiN, Delta_Al, Delta_NbTiN, x_barrier, L_barrier)",
-    }
-    template = get_template(a, subs, dim)
+
+    template = get_template(a, subs_mid, dim)
     shape_coords = get_shape(r, 0, L, shape, dim)
     syst.fill(template, *shape_coords)
 
     if left_lead:
-        subs_left = {**subs_left, "V": "V_left", "Delta": "0"}
-        # lead = make_lead_normal(a, r, shape, dim, subs=subs_left)
         lead = make_lead_SC(a, r, shape, dim, subs=subs_left)
         syst.attach_lead(lead.reversed())
     if right_lead:
-        subs_right = {**subs_right, "V": "V_right", "Delta": "0"}
         lead = make_lead_normal(a, r, shape, dim, subs=subs_right)
-        # lead = make_lead_SC(a, r, shape, dim, subs=subs_right)
         syst.attach_lead(lead)
 
     return syst.finalized()
@@ -183,7 +177,7 @@ def make_lead_normal(a, r=None, shape="hexagon", dim=1, with_holes=True, subs={}
     shape_lead = get_shape(r, shape=shape, dim=dim)
     symmetry = kwant.TranslationalSymmetry((a, 0, 0)[:dim])
     lead = kwant.Builder(symmetry, conservation_law=cons_law if with_holes else None)
-    template = get_template(a, {"Delta": "0", "V": "0", **subs}, dim, with_holes)
+    template = get_template(a, dict(subs, Delta=0), dim, with_holes)
     lead.fill(template, *shape_lead)
     return lead
 
@@ -192,40 +186,9 @@ def make_lead_SC(a, r=None, shape="hexagon", dim=1, with_holes=True, subs={}):
     shape_lead = get_shape(r, shape=shape, dim=dim)
     symmetry = kwant.TranslationalSymmetry((a, 0, 0)[:dim])
     lead = kwant.Builder(symmetry)
-    template = get_template(a, {"Delta": "Delta_Al", "V": "0", **subs}, dim, with_holes)
+    template = get_template(a, subs, dim, with_holes)
     lead.fill(template, *shape_lead)
     return lead
-
-
-def potential(
-    site, mfp, mu, salt, L_NbTiN, V_barrier, L_barrier, x_barrier, V_left, V_right
-):
-    from kwant.digest import uniform
-
-    x = site.pos[0]
-    if x > L_NbTiN or math.isinf(mfp):
-        V = 0
-    else:
-        a = max(site.family._prim_vecs)[0]
-        strength = calc_disorder_from_mfp(mfp, a, mu, dim=len(site.pos))
-        V = strength * (uniform(repr(site.tag), repr(salt)) - 0.5)
-
-    if x > x_barrier:
-        # Right of the junction
-        V += V_right
-    elif x < x_barrier:
-        # Left of the junction
-        V += V_left
-    if x == x_barrier:
-        V += V_barrier
-    return V
-
-
-def Delta(x, L_NbTiN, Delta_Al, Delta_NbTiN, x_barrier, L_barrier):
-    _Delta = Delta_Al if x > L_NbTiN else Delta_NbTiN
-    if abs(x_barrier - x) < L_barrier / 2:
-        _Delta = 0
-    return _Delta
 
 
 def andreev_conductance(smatrix, normal_lead=1):
@@ -438,8 +401,6 @@ def calc_mfp_analytic(mu, a, disorder, dim=1, SI_constants=SI_constants):
 
 
 def calc_disorder_from_mfp(mfp, a, mu, dim=1, SI_constants=SI_constants):
-    import math
-
     if math.isinf(mfp):
         return 0
     c = SI_constants
