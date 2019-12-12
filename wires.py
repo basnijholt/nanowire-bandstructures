@@ -1,344 +1,455 @@
+import cmath
+import functools
+import math
+import re
+import types
+
 import kwant
+import kwant.continuum
 import numpy as np
-import sympy
-from scipy.constants import eV, hbar
-from sympy.physics.quantum import TensorProduct as kr
+import scipy.constants
+from scipy.constants import physical_constants
 
-import discretizer
-
-sx, sy, sz = [sympy.physics.matrices.msigma(i) for i in range(1, 4)]
-s0 = sympy.eye(2)
-s0sz = np.kron(s0, sz)
-s0s0 = np.kron(s0, s0)
+import peierls
 
 
-def make_1d_wire(a=10, L=1, verbose=False):
-    """Makes a hexagonal shaped 3D wire.
+def _V(*x):
+    return 0
 
-    Parameters:
-    -----------
-    a : int
-        Lattice constant in nm.
-    L : int
-        Length of the wire in units of the lattice constant, L=None if infinite
-        wire.
-    vebose : bool
-        Prints the discretized Hamiltonian.
 
-    Returns:
-    --------
-    sys : kwant.builder.(In)finiteSystem object
-        The finalized (in)finite system.
-    """
-    k_x, k_y, k_z = discretizer.momentum_operators
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g = sympy.symbols(
-        "t B_x B_y B_z mu_B Delta mu alpha g", real=True
+def memoize(obj):
+    cache = obj.cache = {}
+
+    @functools.wraps(obj)
+    def memoizer(*args, **kwargs):
+        key = str(args) + str(kwargs)
+        if key not in cache:
+            cache[key] = obj(*args, **kwargs)
+        return cache[key]
+
+    return memoizer
+
+
+# (Fundamental) constants definitions in nm and meV.
+constants = {
+    "m_eff": 0.015 * scipy.constants.m_e / scipy.constants.eV / (1e9) ** 2 * 1e3,
+    "phi_0": 2 * physical_constants["mag. flux quantum"][0] * (1e9) ** 2,
+    "mu_B": physical_constants["Bohr magneton in eV/T"][0] * 1e3,
+    "hbar": scipy.constants.hbar / scipy.constants.eV * 1e3,
+    "exp": cmath.exp,
+}
+
+
+# Hamiltonian and system definition
+
+
+@memoize
+def get_sympy_hamiltonian(subs, dim=1, with_holes=True):
+    ham = (
+        "(0.5 * hbar**2 * (k_x**2 + k_y**2 + k_z**2) / m_eff - mu + V) * kron(sigma_0, sigma_z)"
+        "+ alpha * (k_y * kron(sigma_x, sigma_z) - k_x * kron(sigma_y, sigma_z))"
+        "+ 0.5 * g * mu_B * (B_x * kron(sigma_x, sigma_0) + B_y * kron(sigma_y, sigma_0) + B_z * kron(sigma_z, sigma_0))"
+        "+ Delta * kron(sigma_0, sigma_x)"
     )
 
-    hamiltonian = (
-        (t * k_x ** 2 - mu) * kr(s0, sz)
-        + alpha * (-k_x * kr(sy, sz))
-        + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
-        + Delta * kr(s0, sx)
-    )
+    if dim == 1:
+        ham = ham.replace("k_y", "0")
+        ham = ham.replace("k_z", "0")
+    elif dim == 2:
+        ham = ham.replace("k_z", "0")
 
-    tb = discretizer.Discretizer(hamiltonian, lattice_constant=a, verbose=verbose)
+    if not with_holes:
+        ham = re.sub(r"kron\((sigma_[xyz0]), sigma_[xzy0]\)", r"\1", ham)
 
-    if L is None:
-        sys = kwant.Builder(kwant.TranslationalSymmetry((-a,)))
-        L = 1
+    ham = kwant.continuum.sympify(ham, locals=subs)
+    return ham
+
+
+def get_template(a, subs=None, dim=1, with_holes=True):
+    ham = get_sympy_hamiltonian(subs if subs is not None else {}, dim, with_holes)
+    tb_ham, coords = kwant.continuum.discretize_symbolic(ham)
+    if dim > 1:
+        if dim == 2:
+            vector_potential = "[-B_z * y, 0]"
+        elif dim == 3:
+            vector_potential = "[B_y * z - B_z * y, 0, B_x * y]"
+        tb_ham = peierls.apply(tb_ham, coords, A=vector_potential)
+    template = kwant.continuum.build_discretized(tb_ham, grid=a, coords=coords)
+    return template
+
+
+def get_shape(R, L0=0, L1=None, shape="hexagon", dim=3):
+    if L1 is None:
+        start_coords = (L0, 0, 0)[:dim]
     else:
-        sys = kwant.Builder()
+        start_coords = ((L0 + L1) / 2, 0, 0)[:dim]
 
-    sys[[tb.lattice(x) for x in range(L)]] = tb.onsite
+    def _shape(site):
+        if dim == 1:
+            x = site.pos[0]
+            is_in_shape = True
+        elif dim == 2:
+            (x, y) = site.pos
+            is_in_shape = abs(y) < R
+        elif dim == 3:
+            (x, y, z) = site.pos
+            if shape == "hexagon":
+                is_in_shape = (
+                    y > -R
+                    and y < R
+                    and y > -2 * (R - z)
+                    and y < -2 * (z - R)
+                    and y < 2 * (z + R)
+                    and y > -2 * (z + R)
+                )
+            elif shape == "square":
+                is_in_shape = abs(z) < R and abs(y) < R
+            else:
+                raise ValueError("Only `hexagon` and `square` shape allowed.")
+        return is_in_shape and ((L1 is None) or (x >= 0 and x < L1))
 
-    for hop, val in tb.hoppings.items():
-        sys[hop] = val
-
-    return sys.finalized()
+    return _shape, start_coords
 
 
-def make_2d_wire(a=10, W=10, L=1, holes=True, verbose=False):
-    """Makes a hexagonal shaped 3D wire.
+@memoize
+def make_wire(
+    a,
+    L,
+    r=None,
+    shape="hexagon",
+    dim=1,
+    left_lead=True,
+    right_lead=True,
+    subs_right={},
+    subs_left={},
+):
+    """Create a 3D SNS junction wire.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     a : int
-        Lattice constant in nm.
-    W : int
-        Width of the wire in units of the lattice constant.
+        Discretization constant in nm.
     L : int
-        Length of the wire in units of the lattice constant, L=None if infinite
-        wire.
-    vebose : bool
-        Prints the discretized Hamiltonian.
+        Length of wire in nm.
+    r : int
+        Radius of the wire in nm.
+    shape : str
+        Either `hexagon` or `square` shaped cross section.
 
-    Returns:
+    Returns
+    -------
+    syst : kwant.builder.FiniteSystem
+        The finilized kwant system.
+
+    Examples
     --------
-    sys : kwant.builder.(In)finiteSystem object
-        The finalized (in)finite system.
+    This doesn't use default parameters because the variables need to be saved,
+    to a file. So I create a dictionary that is passed to the function.
+
+    >>> syst_params = dict(a=10, L=100, ...)
+    >>> syst, hopping = make_3d_wire(**syst_params)
+
     """
-    k_x, k_y, k_z = discretizer.momentum_operators
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g = sympy.symbols(
-        "t B_x B_y B_z mu_B Delta mu alpha g", real=True
+    syst = kwant.Builder()
+    V = (
+        "V(site, mfp, mu, salt, L_NbTiN, "
+        "V_barrier, L_barrier, x_barrier, V_left, V_right)"
     )
-    k = sympy.sqrt(k_x ** 2 + k_y ** 2)
-    hamiltonian = (
-        (t * k ** 2 - mu) * kr(s0, sz)
-        + alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz))
-        + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
-        + Delta * kr(s0, sx)
-    )
+    subs = {
+        "V": V,
+        "Delta": "Delta(x, L_NbTiN, Delta_Al, Delta_NbTiN, x_barrier, L_barrier)",
+    }
+    template = get_template(a, subs, dim)
+    shape_coords = get_shape(r, 0, L, shape, dim)
+    syst.fill(template, *shape_coords)
 
-    tb = discretizer.Discretizer(hamiltonian, lattice_constant=a, verbose=verbose)
+    if left_lead:
+        subs_left = {**subs_left, "V": "V_left", "Delta": "0"}
+        # lead = make_lead_normal(a, r, shape, dim, subs=subs_left)
+        lead = make_lead_SC(a, r, shape, dim, subs=subs_left)
+        syst.attach_lead(lead.reversed())
+    if right_lead:
+        subs_right = {**subs_right, "V": "V_right", "Delta": "0"}
+        lead = make_lead_normal(a, r, shape, dim, subs=subs_right)
+        # lead = make_lead_SC(a, r, shape, dim, subs=subs_right)
+        syst.attach_lead(lead)
 
-    if L is None:
-        sys = kwant.Builder(kwant.TranslationalSymmetry((-a, 0)))
-        L = 1
-    else:
-        sys = kwant.Builder()
-
-    sys[[tb.lattice(x, y) for x in range(L) for y in range(W)]] = tb.onsite
-
-    def peierls(val, ind):
-        def phase(s1, s2, p):
-            x, y = s1.pos
-            A = lambda p, x, y: [-p.B_z * y, 0, p.B_x * y]  # noqa: E731
-            A_site = A(p, x, y)[ind]
-            A_site *= a * 1e-18 * eV / hbar
-            return np.cos(A_site) * s0s0 - 1j * np.sin(A_site) * s0sz
-
-        def with_phase(s1, s2, p):
-            if p.orbital:
-                return phase(s1, s2, p).dot(val(s1, s2, p))
-            else:
-                return val(s1, s2, p)
-
-        return with_phase
-
-    for hop, val in tb.hoppings.items():
-        ind = np.argmax(hop.delta)
-        sys[hop] = peierls(val, ind)
-    return sys.finalized()
-
-
-def make_3d_wire(a=10, R=50, L=None, holes=True, verbose=False):
-    """Makes a hexagonal shaped 3D wire.
-
-    Parameters:
-    -----------
-    a : int
-        Lattice constant in nm.
-    R : int
-        Radius of the wire in units in units of nm.
-    L : int
-        Length of the wire in units of nm, L=None if infinite wire.
-    holes : bool
-        True if PHS, False if no holes and only in spin space.
-    vebose : bool
-        Prints the discretized Hamiltonian.
-
-    Returns:
-    --------
-    syst : kwant.builder.(In)finiteSystem object
-        The finalized (in)finite system.
-    """
-    k_x, k_y, k_z = discretizer.momentum_operators
-    x, y, z = discretizer.coordinates
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols(
-        "t B_x B_y B_z mu_B Delta mu alpha g V", real=True
-    )
-    k = sympy.sqrt(k_x ** 2 + k_y ** 2 + k_z ** 2)
-    if holes:
-        hamiltonian = (
-            (t * k ** 2 - mu - V(x, y, z)) * kr(s0, sz)
-            + alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz))
-            + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
-            + Delta * kr(s0, sx)
-        )
-    else:
-        hamiltonian = (
-            (t * k ** 2 - mu - V(x, y, z)) * s0
-            + alpha * (k_y * sx - k_x * sy)
-            + 0.5 * g * mu_B * (B_x * sx + B_y * sy + B_z * sz)
-            + Delta * s0
-        )
-
-    tb = discretizer.Discretizer(hamiltonian, lattice_constant=a, verbose=verbose)
-    syst = kwant.Builder(kwant.TranslationalSymmetry((-a, 0, 0)))
-
-    if L is None:
-        L = 1
-
-    def hexagon(pos):
-        (x, y, z) = pos
-        return (
-            y > -R
-            and y < R
-            and y > -2 * (R - z)
-            and y < -2 * (z - R)
-            and y < 2 * (z + R)
-            and y > -2 * (z + R)
-            and x >= 0
-            and x < L
-        )
-
-    syst[tb.lattice.shape(hexagon, (0, 0, 0))] = tb.onsite
-
-    def peierls(val, ind):
-        def phase(s1, s2, p):
-            x, y, z = s1.pos
-            A = lambda p, x, y, z: [p.B_y * z - p.B_z * y, 0, p.B_x * y]  # noqa: E731
-            A_site = A(p, x, y, z)[ind]
-            A_site *= a * 1e-18 * eV / hbar
-            if holes:
-                return np.cos(A_site) * s0s0 - 1j * np.sin(A_site) * s0sz
-            else:
-                return np.exp(-1j * A_site)
-
-        def with_phase(s1, s2, p):
-            if p.orbital:
-                try:
-                    return phase(s1, s2, p).dot(val(s1, s2, p))
-                except AttributeError:
-                    return phase(s1, s2, p) * val(s1, s2, p)
-            else:
-                return val(s1, s2, p)
-
-        return with_phase
-
-    for hop, val in tb.hoppings.items():
-        ind = np.argmax(hop.delta)
-        syst[hop] = peierls(val, ind)
     return syst.finalized()
 
 
-def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=True):
-    """Makes a hexagonal shaped 3D wire with external superconductor.
+def make_lead_normal(a, r=None, shape="hexagon", dim=1, with_holes=True, subs={}):
+    sz = np.array([[1, 0], [0, -1]])
+    cons_law = np.kron(np.eye(2), -sz)
+    shape_lead = get_shape(r, shape=shape, dim=dim)
+    symmetry = kwant.TranslationalSymmetry((a, 0, 0)[:dim])
+    lead = kwant.Builder(symmetry, conservation_law=cons_law if with_holes else None)
+    template = get_template(a, {"Delta": "0", "V": "0", **subs}, dim, with_holes)
+    lead.fill(template, *shape_lead)
+    return lead
 
-    Parameters:
-    -----------
-    a : int
-        Lattice constant in nm.
-    r1 : float
-        Diameter of wire part in nm.
-    r2 : float
-        Diameter of wire plus superconductor part in nm.
-    phi : float
-        Coverage angle of superconductor in degrees.
-    angle : float
-        Angle of the superconductor w.r.t. the y-axis in degrees.
-    finalized : bool
-        Return a finalized system if True or kwant.Builder object
-        if False.
 
-    Returns:
-    --------
-    syst : kwant.builder.InfiniteSystem object
-        The finalized infinite system.
-    """
-    k_x, k_y, k_z = discretizer.momentum_operators
-    x, y, z = discretizer.coordinates
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols(
-        "t B_x B_y B_z mu_B Delta mu alpha g V", real=True
-    )
-    t_interface = sympy.symbols("t_interface", real=True)
-    k = sympy.sqrt(k_x ** 2 + k_y ** 2 + k_z ** 2)
+def make_lead_SC(a, r=None, shape="hexagon", dim=1, with_holes=True, subs={}):
+    shape_lead = get_shape(r, shape=shape, dim=dim)
+    symmetry = kwant.TranslationalSymmetry((a, 0, 0)[:dim])
+    lead = kwant.Builder(symmetry)
+    template = get_template(a, {"Delta": "Delta_Al", "V": "0", **subs}, dim, with_holes)
+    lead.fill(template, *shape_lead)
+    return lead
 
-    hamiltonian = (
-        (t * k ** 2 - mu - V(x, y, z)) * kr(s0, sz)
-        + alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz))
-        + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
-        + Delta * kr(s0, sx)
-    )
 
-    def cylinder_sector(r1, r2=0, phi=360, angle=angle):
-        phi *= np.pi / 360
-        angle *= np.pi / 180
-        r1sq, r2sq = r1 ** 2, r2 ** 2
+def potential(
+    site, mfp, mu, salt, L_NbTiN, V_barrier, L_barrier, x_barrier, V_left, V_right
+):
+    from kwant.digest import uniform
 
-        def sector(pos):
-            x, y, z = pos
-            n = (y + 1j * z) * np.exp(1j * angle)
-            y, z = n.real, n.imag
-            rsq = y ** 2 + z ** 2
-            return r2sq <= rsq < r1sq and z >= np.cos(phi) * np.sqrt(rsq)
-
-        r_mid = (r1 + r2) / 2
-        return sector, (0, r_mid * np.sin(angle), r_mid * np.cos(angle))
-
-    args = dict(lattice_constant=a)
-    tb_normal = discretizer.Discretizer(hamiltonian.subs(Delta, 0), **args)
-    tb_sc = discretizer.Discretizer(hamiltonian, **args)
-    tb_interface = discretizer.Discretizer(hamiltonian.subs(t, t_interface), **args)
-    lat = tb_normal.lattice
-    syst = kwant.Builder(kwant.TranslationalSymmetry((-a, 0, 0)))
-
-    shape_normal = cylinder_sector(r1=r1, angle=angle)
-    shape_sc = cylinder_sector(r1=r2, r2=r1, phi=phi, angle=angle)
-
-    syst[lat.shape(*shape_normal)] = tb_normal.onsite
-    syst[lat.shape(*shape_sc)] = tb_sc.onsite
-    sc_sites = list(syst.expand(lat.shape(*shape_sc)))
-
-    def peierls(val, ind, a):
-        def phase(s1, s2, p):
-            x, y, z = s1.pos
-            A = lambda p, x, y, z: [p.B_y * z - p.B_z * y, 0, p.B_x * y]  # noqa: E731
-            A_site = A(p, x, y, z)[ind]
-            if p.A_correction:
-                A_sc = [A(p, *site.pos) for site in sc_sites]
-                A_site -= np.mean(A_sc, axis=0)[ind]
-            A_site *= a * 1e-18 * eV / hbar
-            return np.cos(A_site) * s0s0 - 1j * np.sin(A_site) * s0sz
-
-        def with_phase(s1, s2, p):
-            if p.orbital:
-                return phase(s1, s2, p).dot(val(s1, s2, p))
-            else:
-                return val(s1, s2, p)
-
-        return with_phase
-
-    def hoppingkind_in_shape(hop, shape, syst):
-        """Returns an HoppingKind iterator for hoppings in shape."""
-
-        def in_shape(site1, site2, shape):
-            return shape[0](site1.pos) and shape[0](site2.pos)
-
-        hoppingkind = kwant.HoppingKind(hop.delta, hop.family_a)(syst)
-        return ((i, j) for (i, j) in hoppingkind if in_shape(i, j, shape))
-
-    def hoppingkind_at_interface(hop, shape1, shape2, syst):
-        """Returns an HoppingKind iterator for hoppings at an interface between
-           shape1 and shape2."""
-
-        def at_interface(site1, site2, shape1, shape2):
-            return (shape1[0](site1.pos) and shape2[0](site2.pos)) or (
-                shape2[0](site1.pos) and shape1[0](site2.pos)
-            )
-
-        hoppingkind = kwant.HoppingKind(hop.delta, hop.family_a)(syst)
-        return ((i, j) for (i, j) in hoppingkind if at_interface(i, j, shape1, shape2))
-
-    for hop, func in tb_normal.hoppings.items():
-        # Add hoppings in normal parts of wire and lead with Peierls substitution
-        ind = np.argmax(hop.delta)  # Index of direction of hopping
-        syst[hoppingkind_in_shape(hop, shape_normal, syst)] = peierls(func, ind, a)
-
-    for hop, func in tb_sc.hoppings.items():
-        # Add hoppings in superconducting parts of wire and lead with Peierls substitution
-        ind = np.argmax(hop.delta)  # Index of direction of hopping
-        syst[hoppingkind_in_shape(hop, shape_sc, syst)] = peierls(func, ind, a)
-
-    for hop, func in tb_interface.hoppings.items():
-        # Add hoppings at the interface of superconducting parts and normal parts of wire and lead
-        ind = np.argmax(hop.delta)  # Index of direction of hopping
-        syst[hoppingkind_at_interface(hop, shape_sc, shape_normal, syst)] = peierls(
-            func, ind, a
-        )
-
-    if finalized:
-        return syst.finalized()
+    x = site.pos[0]
+    if x > L_NbTiN or math.isinf(mfp):
+        V = 0
     else:
-        return syst
+        a = max(site.family._prim_vecs)[0]
+        strength = calc_disorder_from_mfp(mfp, a, mu, dim=len(site.pos))
+        V = strength * (uniform(repr(site.tag), repr(salt)) - 0.5)
+
+    if x > x_barrier:
+        # Right of the junction
+        V += V_right
+    elif x < x_barrier:
+        # Left of the junction
+        V += V_left
+    if x == x_barrier:
+        V += V_barrier
+    return V
+
+
+def Delta(x, L_NbTiN, Delta_Al, Delta_NbTiN, x_barrier, L_barrier):
+    _Delta = Delta_Al if x > L_NbTiN else Delta_NbTiN
+    if abs(x_barrier - x) < L_barrier / 2:
+        _Delta = 0
+    return _Delta
+
+
+def andreev_conductance(smatrix, normal_lead=1):
+    """The Andreev conductance is N - R_ee + R_he."""
+    r_ee = smatrix.transmission((normal_lead, 0), (normal_lead, 0))
+    r_he = smatrix.transmission((normal_lead, 1), (normal_lead, 0))
+    N_e = smatrix.submatrix((normal_lead, 0), (normal_lead, 0)).shape[0]
+    return N_e - r_ee + r_he
+
+
+def bands(lead, params, ks=None):
+    if ks is None:
+        ks = np.linspace(-3, 3)
+
+    bands = kwant.physics.Bands(lead, params=params)
+
+    if isinstance(ks, (float, int)):
+        return bands(ks)
+    else:
+        return np.array([bands(k) for k in ks])
+
+
+def translation_ev(h, t, tol=1e6):
+    """Compute the eigenvalues of the translation operator of a lead.
+
+    Adapted from kwant.physics.leads.modes.
+
+    Parameters
+    ----------
+    h : numpy array, real or complex, shape (N, N) The unit cell
+        Hamiltonian of the lead unit cell.
+    t : numpy array, real or complex, shape (N, M)
+        The hopping matrix from a lead cell to the one on which self-energy
+        has to be calculated (and any other hopping in the same direction).
+    tol : float
+        Numbers and differences are considered zero when they are smaller
+        than `tol` times the machine precision.
+
+    Returns
+    -------
+    ev : numpy array
+        Eigenvalues of the translation operator in the form lambda=r*exp(i*k),
+        for |r|=1 they are propagating modes.
+    """
+    a, b = kwant.physics.leads.setup_linsys(h, t, tol, None).eigenproblem
+    ev = kwant.physics.leads.unified_eigenproblem(a, b, tol=tol)[0]
+    return ev
+
+
+def cell_mats(lead, params, bias=0):
+    h = lead.cell_hamiltonian(params=params)
+    h -= bias * np.identity(len(h))
+    t = lead.inter_cell_hopping(params=params)
+    return h, t
+
+
+@memoize
+def gap_minimizer(lead, params, energy):
+    """Function that minimizes a function to find the band gap.
+    This objective function checks if there are progagating modes at a
+    certain energy. Returns zero if there is a propagating mode.
+
+    Parameters
+    ----------
+    lead : kwant.builder.InfiniteSystem object
+        The finalized infinite system.
+    params : dict
+        A dict that is used to store Hamiltonian parameters.
+    energy : float
+        Energy at which this function checks for propagating modes.
+
+    Returns
+    -------
+    minimized_scalar : float
+        Value that is zero when there is a propagating mode.
+    """
+    h, t = cell_mats(lead, params, bias=energy)
+    ev = translation_ev(h, t)
+    norm = (ev * ev.conj()).real
+    return np.min(np.abs(norm - 1))
+
+
+@memoize
+def find_gap(lead, params, tol=1e-6):
+    """Finds the gapsize by peforming a binary search of the modes with a
+    tolarance of tol.
+
+    Parameters
+    ----------
+    lead : kwant.builder.InfiniteSystem object
+        The finalized infinite system.
+    params : dict
+        A dict that is used to store Hamiltonian parameters.
+    tol : float
+        The precision of the binary search.
+
+    Returns
+    -------
+    gap : float
+        Size of the gap.
+    """
+    lim = [0, np.abs(bands(lead, params, ks=0)).min()]
+    if gap_minimizer(lead, params, energy=0) < 1e-15:
+        # No band gap
+        gap = 0
+    else:
+        while lim[1] - lim[0] > tol:
+            energy = sum(lim) / 2
+            par = gap_minimizer(lead, params, energy)
+            if par < 1e-10:
+                lim[1] = energy
+            else:
+                lim[0] = energy
+        gap = sum(lim) / 2
+    return gap
+
+
+def get_cross_section(syst, pos, direction):
+    coord = np.array([s.pos for s in syst.sites if s.pos[direction] == pos])
+    cross_section = np.delete(coord, direction, 1)
+    return cross_section
+
+
+def get_densities(lead, k, params):
+    xy = get_cross_section(lead, pos=0, direction=0)
+    h, t = lead.cell_hamiltonian(params=params), lead.inter_cell_hopping(params=params)
+    h_k = h + t * np.exp(1j * k) + t.T.conj() * np.exp(-1j * k)
+
+    vals, vecs = np.linalg.eigh(h_k)
+    indxs = np.argsort(np.abs(vals))
+    vecs = vecs[:, indxs]
+    vals = vals[indxs]
+
+    norbs = lat_from_syst(lead).norbs
+    densities = np.linalg.norm(vecs.reshape(-1, norbs, len(vecs)), axis=1) ** 2
+    return xy, vals, densities.T
+
+
+def plot_wfs_in_cross_section(lead, params, k, num_bands=40):
+    import holoviews as hv
+
+    xy, energies, densities = get_densities(lead, k, params)
+    wfs = [
+        kwant.plotter.mask_interpolate(xy, density, oversampling=1)[0]
+        for density in densities[:num_bands]
+    ]
+    ims = {E: hv.Image(wf) for E, wf in zip(energies, wfs)}
+    return hv.HoloMap(ims, kdims=[hv.Dimension("E", unit="meV")])
+
+
+def get_h_k(lead, params):
+    h, t = cell_mats(lead, params)
+    h_k = lambda k: h + t * np.exp(1j * k) + t.T.conj() * np.exp(-1j * k)  # noqa: E731
+    return h_k
+
+
+def lat_from_syst(syst):
+    lats = {s.family for s in syst.sites}
+    if len(lats) > 1:
+        raise Exception("No unique lattice in the system.")
+    return list(lats)[0]
+
+
+# Scales
+
+SI_constants = types.SimpleNamespace(
+    hbar=scipy.constants.hbar,
+    meV=scipy.constants.eV * 1e-3,
+    m_eff=scipy.constants.m_e * 0.015,
+)
+
+
+def calc_k_F(mu, SI_constants=SI_constants):
+    c = SI_constants
+    return np.sqrt(2 * mu * c.m_eff / c.hbar ** 2)
+
+
+def calc_v_F(mu, SI_constants=SI_constants):
+    c = SI_constants
+    k_F = calc_k_F(mu, SI_constants)
+    return c.hbar * k_F / c.m_eff
+
+
+def calc_fermi_wavelength(mu, SI_constants=SI_constants):
+    k_F = calc_k_F(mu, SI_constants)
+    return 2 * np.pi / k_F
+
+
+# Below, non-default arguments have units of meV and nm
+
+
+def calc_alpha(l_R, SI_constants=SI_constants):
+    c = SI_constants
+    l_R *= 1e-9
+    return c.hbar ** 2 / (c.m_eff * l_R) / (1e-9 * c.meV)
+
+
+def calc_mfp_analytic(mu, a, disorder, dim=1, SI_constants=SI_constants):
+    c = SI_constants
+    mu *= c.meV
+    a *= 1e-9
+    w = disorder * c.meV / 2
+    v_F = calc_v_F(mu, c)
+    if dim == 1:
+        rho = a * np.sqrt(c.m_eff / (2 * mu)) / (np.pi * c.hbar)
+    elif dim == 2:
+        rho = a ** 2 * c.m_eff / (np.pi * c.hbar ** 2)
+    mfp = c.hbar * v_F / (2 * np.pi) * (rho * w ** 2 / 3) ** (-1)
+    return mfp * 1e9
+
+
+def calc_disorder_from_mfp(mfp, a, mu, dim=1, SI_constants=SI_constants):
+    import math
+
+    if math.isinf(mfp):
+        return 0
+    c = SI_constants
+    mfp *= 1e-9
+    a *= 1e-9
+    mu *= c.meV
+    v_F = calc_v_F(mu, c)
+    if dim == 1:
+        rho = a * np.sqrt(c.m_eff / (2 * mu)) / (np.pi * c.hbar)
+    elif dim == 2:
+        rho = a ** 2 * c.m_eff / (np.pi * c.hbar ** 2)
+
+    return np.sqrt((3 * c.hbar * v_F) / (2 * np.pi * mfp * rho)) / (c.meV / 2)
