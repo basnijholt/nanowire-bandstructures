@@ -1,9 +1,10 @@
-import discretizer
 import kwant
 import numpy as np
-from scipy.constants import hbar, eV
 import sympy
+from scipy.constants import eV, hbar
 from sympy.physics.quantum import TensorProduct as kr
+
+import discretizer
 
 sx, sy, sz = [sympy.physics.matrices.msigma(i) for i in range(1, 4)]
 s0 = sympy.eye(2)
@@ -30,17 +31,21 @@ def make_1d_wire(a=10, L=1, verbose=False):
         The finalized (in)finite system.
     """
     k_x, k_y, k_z = discretizer.momentum_operators
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g = sympy.symbols('t B_x B_y B_z mu_B Delta mu alpha g', real=True)
+    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g = sympy.symbols(
+        "t B_x B_y B_z mu_B Delta mu alpha g", real=True
+    )
 
-    hamiltonian = ((t * k_x**2 - mu) * kr(s0, sz) +
-                   alpha * (- k_x * kr(sy, sz)) +
-                   0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0)) +
-                   Delta * kr(s0, sx))
+    hamiltonian = (
+        (t * k_x ** 2 - mu) * kr(s0, sz)
+        + alpha * (-k_x * kr(sy, sz))
+        + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
+        + Delta * kr(s0, sx)
+    )
 
     tb = discretizer.Discretizer(hamiltonian, lattice_constant=a, verbose=verbose)
 
     if L is None:
-        sys = kwant.Builder(kwant.TranslationalSymmetry((-a, )))
+        sys = kwant.Builder(kwant.TranslationalSymmetry((-a,)))
         L = 1
     else:
         sys = kwant.Builder()
@@ -74,12 +79,16 @@ def make_2d_wire(a=10, W=10, L=1, holes=True, verbose=False):
         The finalized (in)finite system.
     """
     k_x, k_y, k_z = discretizer.momentum_operators
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g = sympy.symbols('t B_x B_y B_z mu_B Delta mu alpha g', real=True)
-    k =  sympy.sqrt(k_x**2+k_y**2)
-    hamiltonian = ((t * k**2 - mu) * kr(s0, sz) +
-                   alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz)) +
-                   0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0)) +
-                   Delta * kr(s0, sx))
+    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g = sympy.symbols(
+        "t B_x B_y B_z mu_B Delta mu alpha g", real=True
+    )
+    k = sympy.sqrt(k_x ** 2 + k_y ** 2)
+    hamiltonian = (
+        (t * k ** 2 - mu) * kr(s0, sz)
+        + alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz))
+        + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
+        + Delta * kr(s0, sx)
+    )
 
     tb = discretizer.Discretizer(hamiltonian, lattice_constant=a, verbose=verbose)
 
@@ -89,13 +98,12 @@ def make_2d_wire(a=10, W=10, L=1, holes=True, verbose=False):
     else:
         sys = kwant.Builder()
 
-
     sys[[tb.lattice(x, y) for x in range(L) for y in range(W)]] = tb.onsite
 
     def peierls(val, ind):
         def phase(s1, s2, p):
             x, y = s1.pos
-            A = lambda p, x, y: [-p.B_z * y, 0, p.B_x * y]
+            A = lambda p, x, y: [-p.B_z * y, 0, p.B_x * y]  # noqa: E731
             A_site = A(p, x, y)[ind]
             A_site *= a * 1e-18 * eV / hbar
             return np.cos(A_site) * s0s0 - 1j * np.sin(A_site) * s0sz
@@ -105,8 +113,8 @@ def make_2d_wire(a=10, W=10, L=1, holes=True, verbose=False):
                 return phase(s1, s2, p).dot(val(s1, s2, p))
             else:
                 return val(s1, s2, p)
-        return with_phase
 
+        return with_phase
 
     for hop, val in tb.hoppings.items():
         ind = np.argmax(hop.delta)
@@ -137,20 +145,26 @@ def make_3d_wire(a=10, R=50, L=None, holes=True, verbose=False):
     """
     k_x, k_y, k_z = discretizer.momentum_operators
     x, y, z = discretizer.coordinates
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols('t B_x B_y B_z mu_B Delta mu alpha g V', real=True)
-    k =  sympy.sqrt(k_x**2+k_y**2+k_z**2)
+    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols(
+        "t B_x B_y B_z mu_B Delta mu alpha g V", real=True
+    )
+    k = sympy.sqrt(k_x ** 2 + k_y ** 2 + k_z ** 2)
     if holes:
-        hamiltonian = ((t * k**2 - mu - V(x, y, z)) * kr(s0, sz) +
-                       alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz)) +
-                       0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0)) +
-                       Delta * kr(s0, sx))
+        hamiltonian = (
+            (t * k ** 2 - mu - V(x, y, z)) * kr(s0, sz)
+            + alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz))
+            + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
+            + Delta * kr(s0, sx)
+        )
     else:
-        hamiltonian = ((t * k**2 - mu - V(x, y, z)) * s0 + alpha * (k_y * sx - k_x * sy) +
-                       0.5 * g * mu_B * (B_x * sx + B_y * sy + B_z * sz) +
-                       Delta * s0)
+        hamiltonian = (
+            (t * k ** 2 - mu - V(x, y, z)) * s0
+            + alpha * (k_y * sx - k_x * sy)
+            + 0.5 * g * mu_B * (B_x * sx + B_y * sy + B_z * sz)
+            + Delta * s0
+        )
 
-    tb = discretizer.Discretizer(hamiltonian, lattice_constant=a,
-                     verbose=verbose)
+    tb = discretizer.Discretizer(hamiltonian, lattice_constant=a, verbose=verbose)
     syst = kwant.Builder(kwant.TranslationalSymmetry((-a, 0, 0)))
 
     if L is None:
@@ -158,16 +172,23 @@ def make_3d_wire(a=10, R=50, L=None, holes=True, verbose=False):
 
     def hexagon(pos):
         (x, y, z) = pos
-        return (y > -R and y < R and y > -2 * (R - z) and y < -2 *
-                (z - R) and y < 2 * (z + R) and y > -2 *
-                (z + R) and x >= 0 and x < L)
+        return (
+            y > -R
+            and y < R
+            and y > -2 * (R - z)
+            and y < -2 * (z - R)
+            and y < 2 * (z + R)
+            and y > -2 * (z + R)
+            and x >= 0
+            and x < L
+        )
 
     syst[tb.lattice.shape(hexagon, (0, 0, 0))] = tb.onsite
 
     def peierls(val, ind):
         def phase(s1, s2, p):
             x, y, z = s1.pos
-            A = lambda p, x, y, z: [p.B_y * z - p.B_z * y, 0, p.B_x * y]
+            A = lambda p, x, y, z: [p.B_y * z - p.B_z * y, 0, p.B_x * y]  # noqa: E731
             A_site = A(p, x, y, z)[ind]
             A_site *= a * 1e-18 * eV / hbar
             if holes:
@@ -183,13 +204,13 @@ def make_3d_wire(a=10, R=50, L=None, holes=True, verbose=False):
                     return phase(s1, s2, p) * val(s1, s2, p)
             else:
                 return val(s1, s2, p)
+
         return with_phase
 
     for hop, val in tb.hoppings.items():
         ind = np.argmax(hop.delta)
         syst[hop] = peierls(val, ind)
     return syst.finalized()
-
 
 
 def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=True):
@@ -218,25 +239,31 @@ def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=Tr
     """
     k_x, k_y, k_z = discretizer.momentum_operators
     x, y, z = discretizer.coordinates
-    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols('t B_x B_y B_z mu_B Delta mu alpha g V', real=True)
-    t_interface = sympy.symbols('t_interface', real=True)
-    k =  sympy.sqrt(k_x**2+k_y**2+k_z**2)
+    t, B_x, B_y, B_z, mu_B, Delta, mu, alpha, g, V = sympy.symbols(
+        "t B_x B_y B_z mu_B Delta mu alpha g V", real=True
+    )
+    t_interface = sympy.symbols("t_interface", real=True)
+    k = sympy.sqrt(k_x ** 2 + k_y ** 2 + k_z ** 2)
 
-    hamiltonian = ((t * k**2 - mu - V(x, y, z)) * kr(s0, sz) +
-                   alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz)) +
-                   0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0)) +
-                   Delta * kr(s0, sx))
+    hamiltonian = (
+        (t * k ** 2 - mu - V(x, y, z)) * kr(s0, sz)
+        + alpha * (k_y * kr(sx, sz) - k_x * kr(sy, sz))
+        + 0.5 * g * mu_B * (B_x * kr(sx, s0) + B_y * kr(sy, s0) + B_z * kr(sz, s0))
+        + Delta * kr(s0, sx)
+    )
 
     def cylinder_sector(r1, r2=0, phi=360, angle=angle):
         phi *= np.pi / 360
         angle *= np.pi / 180
         r1sq, r2sq = r1 ** 2, r2 ** 2
+
         def sector(pos):
             x, y, z = pos
             n = (y + 1j * z) * np.exp(1j * angle)
             y, z = n.real, n.imag
             rsq = y ** 2 + z ** 2
             return r2sq <= rsq < r1sq and z >= np.cos(phi) * np.sqrt(rsq)
+
         r_mid = (r1 + r2) / 2
         return sector, (0, r_mid * np.sin(angle), r_mid * np.cos(angle))
 
@@ -257,7 +284,7 @@ def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=Tr
     def peierls(val, ind, a):
         def phase(s1, s2, p):
             x, y, z = s1.pos
-            A = lambda p, x, y, z: [p.B_y * z - p.B_z * y, 0, p.B_x * y]
+            A = lambda p, x, y, z: [p.B_y * z - p.B_z * y, 0, p.B_x * y]  # noqa: E731
             A_site = A(p, x, y, z)[ind]
             if p.A_correction:
                 A_sc = [A(p, *site.pos) for site in sc_sites]
@@ -270,45 +297,47 @@ def make_3d_wire_external_sc(a=10, r1=50, r2=70, phi=135, angle=45, finalized=Tr
                 return phase(s1, s2, p).dot(val(s1, s2, p))
             else:
                 return val(s1, s2, p)
-        return with_phase
 
+        return with_phase
 
     def hoppingkind_in_shape(hop, shape, syst):
         """Returns an HoppingKind iterator for hoppings in shape."""
+
         def in_shape(site1, site2, shape):
             return shape[0](site1.pos) and shape[0](site2.pos)
+
         hoppingkind = kwant.HoppingKind(hop.delta, hop.family_a)(syst)
         return ((i, j) for (i, j) in hoppingkind if in_shape(i, j, shape))
-
 
     def hoppingkind_at_interface(hop, shape1, shape2, syst):
         """Returns an HoppingKind iterator for hoppings at an interface between
            shape1 and shape2."""
+
         def at_interface(site1, site2, shape1, shape2):
-            return ((shape1[0](site1.pos) and shape2[0](site2.pos)) or 
-                    (shape2[0](site1.pos) and shape1[0](site2.pos)))
+            return (shape1[0](site1.pos) and shape2[0](site2.pos)) or (
+                shape2[0](site1.pos) and shape1[0](site2.pos)
+            )
+
         hoppingkind = kwant.HoppingKind(hop.delta, hop.family_a)(syst)
         return ((i, j) for (i, j) in hoppingkind if at_interface(i, j, shape1, shape2))
 
-
     for hop, func in tb_normal.hoppings.items():
         # Add hoppings in normal parts of wire and lead with Peierls substitution
-        ind = np.argmax(hop.delta) # Index of direction of hopping
+        ind = np.argmax(hop.delta)  # Index of direction of hopping
         syst[hoppingkind_in_shape(hop, shape_normal, syst)] = peierls(func, ind, a)
 
-        
     for hop, func in tb_sc.hoppings.items():
         # Add hoppings in superconducting parts of wire and lead with Peierls substitution
-        ind = np.argmax(hop.delta) # Index of direction of hopping
+        ind = np.argmax(hop.delta)  # Index of direction of hopping
         syst[hoppingkind_in_shape(hop, shape_sc, syst)] = peierls(func, ind, a)
-
 
     for hop, func in tb_interface.hoppings.items():
         # Add hoppings at the interface of superconducting parts and normal parts of wire and lead
-        ind = np.argmax(hop.delta) # Index of direction of hopping
-        syst[hoppingkind_at_interface(hop, shape_sc, shape_normal, syst)] = peierls(func, ind, a)
+        ind = np.argmax(hop.delta)  # Index of direction of hopping
+        syst[hoppingkind_at_interface(hop, shape_sc, shape_normal, syst)] = peierls(
+            func, ind, a
+        )
 
-    
     if finalized:
         return syst.finalized()
     else:
