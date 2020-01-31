@@ -1,13 +1,10 @@
 name: nanowire-bandstructures
 
 channels:
-- basnijholt
 - conda-forge
 
 dependencies:
-  - python=3.5
+  - python
   - kwant
   - holoviews
-  - sympy
-  - discretizer
   - texlive-core
