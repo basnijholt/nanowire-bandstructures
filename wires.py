@@ -78,7 +78,9 @@ def get_template(a, subs=None, dim=1, with_holes=True):
             vector_potential = "[-B_z * y, 0]"
         elif dim == 3:
             vector_potential = "[B_y * z - B_z * y, 0, B_x * y]"
-        tb_ham = peierls.apply(tb_ham, coords, A=vector_potential)
+        # TODO: check if signs are correc
+        signs = [1, 1] if not with_holes else [1, 1, -1, -1]
+        tb_ham = peierls.apply(tb_ham, coords, A=vector_potential, signs=signs)
     template = kwant.continuum.build_discretized(tb_ham, grid=a, coords=coords)
     return template
 
