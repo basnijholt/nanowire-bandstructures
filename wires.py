@@ -3,14 +3,19 @@ import functools
 import math
 import re
 import types
+from typing import Union
 
 import kwant
 import kwant.continuum
 import numpy as np
 import scipy.constants
 from scipy.constants import physical_constants
+from shapely.geometry import Point, Polygon
+from shapely import speedups
 
 import peierls
+
+speedups.enable()
 
 
 def _V(*x):
@@ -78,7 +83,11 @@ def get_template(a, subs=None, dim=1, with_holes=True):
     return template
 
 
-def get_shape(R, L0=0, L1=None, shape="hexagon", dim=3):
+def get_triangle(R):
+    return Polygon([(-R, -R), (R, -R), (0, R)])
+
+
+def get_shape(R, L0=0, L1=None, shape: Union[str, Polygon] = "hexagon", dim=3):
     if L1 is None:
         start_coords = (L0, 0, 0)[:dim]
     else:
@@ -104,8 +113,12 @@ def get_shape(R, L0=0, L1=None, shape="hexagon", dim=3):
                 )
             elif shape == "square":
                 is_in_shape = abs(z) < R and abs(y) < R
+            elif isinstance(shape, Polygon):
+                is_in_shape = shape.buffer(1e-10).contains(Point(y, z))
             else:
-                raise ValueError("Only `hexagon` and `square` shape allowed.")
+                raise ValueError(
+                    "Only 'hexagon' and 'square', and `shapely.geometry.Polygon` allowed."
+                )
         return is_in_shape and ((L1 is None) or (x >= 0 and x < L1))
 
     return _shape, start_coords
