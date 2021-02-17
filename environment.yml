@@ -6,5 +6,6 @@ channels:
 dependencies:
   - python
   - kwant
+  - shapely
   - holoviews
   - texlive-core
